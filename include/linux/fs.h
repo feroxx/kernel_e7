@@ -998,6 +998,7 @@ struct file {
 	struct path		f_path;
 #define f_dentry	f_path.dentry
 #define f_vfsmnt	f_path.mnt
+	struct inode		*f_inode;       /* cached value */
 	const struct file_operations	*f_op;
 
 	/*
@@ -2090,7 +2091,7 @@ enum {
 extern int finish_open(struct file *file, struct dentry *dentry,
 			int (*open)(struct inode *, struct file *),
 			int *opened);
-extern void finish_no_open(struct file *file, struct dentry *dentry);
+extern int finish_no_open(struct file *file, struct dentry *dentry);
 
 /* fs/ioctl.c */
 
@@ -2104,8 +2105,7 @@ extern struct kmem_cache *names_cachep;
 
 extern void final_putname(struct filename *name);
 
-#define __getname_gfp(gfp)	kmem_cache_alloc(names_cachep, (gfp))
-#define __getname()		__getname_gfp(GFP_KERNEL)
+#define __getname()		kmem_cache_alloc(names_cachep, GFP_KERNEL)
 #define __putname(name)		kmem_cache_free(names_cachep, (void *)(name))
 #ifndef CONFIG_AUDITSYSCALL
 #define putname(name)		final_putname(name)
@@ -2288,6 +2288,12 @@ extern int generic_permission(struct inode *, int);
 static inline bool execute_ok(struct inode *inode)
 {
 	return (inode->i_mode & S_IXUGO) || S_ISDIR(inode->i_mode);
+}
+
+static inline struct inode *file_inode(struct file *f)
+{
+	/* return f->f_path.dentry->d_inode; / can also use this */
+	return f->f_inode;
 }
 
 /*
