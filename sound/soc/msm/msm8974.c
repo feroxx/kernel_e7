@@ -2602,7 +2602,6 @@ static struct snd_soc_dai_link msm8974_hdmi_dai_link[] = {
 		.be_id = MSM_BACKEND_DAI_HDMI_RX,
 		.be_hw_params_fixup = msm8974_hdmi_be_hw_params_fixup,
 		.ignore_pmdown_time = 1,
-		.ignore_suspend = 1,
 	},
 };
 
