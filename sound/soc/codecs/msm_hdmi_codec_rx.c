@@ -1,4 +1,4 @@
-/* Copyright (c) 2012-2013, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2012, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -13,7 +13,6 @@
 #include <linux/slab.h>
 #include <linux/module.h>
 #include <linux/of_device.h>
-#include <linux/err.h>
 #include <sound/core.h>
 #include <sound/pcm.h>
 #include <sound/soc.h>
@@ -26,78 +25,6 @@ struct msm_hdmi_audio_codec_rx_data {
 	struct msm_hdmi_audio_codec_ops hdmi_ops;
 };
 
-static int msm_hdmi_edid_ctl_info(struct snd_kcontrol *kcontrol,
-			struct snd_ctl_elem_info *uinfo)
-{
-	struct snd_soc_codec *codec = snd_kcontrol_chip(kcontrol);
-	struct msm_hdmi_audio_codec_rx_data *codec_data;
-	struct msm_hdmi_audio_edid_blk edid_blk;
-	int rc;
-
-	codec_data = snd_soc_codec_get_drvdata(codec);
-	rc = codec_data->hdmi_ops.get_audio_edid_blk(codec_data->hdmi_core_pdev,
-						     &edid_blk);
-	if (!IS_ERR_VALUE(rc)) {
-		uinfo->type = SNDRV_CTL_ELEM_TYPE_BYTES;
-		uinfo->count = edid_blk.audio_data_blk_size +
-			       edid_blk.spk_alloc_data_blk_size;
-	}
-
-	return 0;
-}
-
-static int msm_hdmi_edid_get(struct snd_kcontrol *kcontrol,
-				struct snd_ctl_elem_value *ucontrol) {
-	struct snd_soc_codec *codec = snd_kcontrol_chip(kcontrol);
-	struct msm_hdmi_audio_codec_rx_data *codec_data;
-	struct msm_hdmi_audio_edid_blk edid_blk;
-	int rc;
-
-	codec_data = snd_soc_codec_get_drvdata(codec);
-	rc = codec_data->hdmi_ops.get_audio_edid_blk(
-			codec_data->hdmi_core_pdev, &edid_blk);
-
-	if (!IS_ERR_VALUE(rc)) {
-		memcpy(ucontrol->value.bytes.data, edid_blk.audio_data_blk,
-		       edid_blk.audio_data_blk_size);
-		memcpy((ucontrol->value.bytes.data +
-		       edid_blk.audio_data_blk_size),
-		       edid_blk.spk_alloc_data_blk,
-		       edid_blk.spk_alloc_data_blk_size);
-	}
-
-	return rc;
-}
-
-static const struct snd_kcontrol_new msm_hdmi_codec_rx_controls[] = {
-	{
-		.access = SNDRV_CTL_ELEM_ACCESS_READ |
-			  SNDRV_CTL_ELEM_ACCESS_VOLATILE,
-		.iface	= SNDRV_CTL_ELEM_IFACE_PCM,
-		.name	= "HDMI EDID",
-		.info	= msm_hdmi_edid_ctl_info,
-		.get	= msm_hdmi_edid_get,
-	},
-};
-
-static int msm_hdmi_audio_codec_rx_dai_startup(
-		struct snd_pcm_substream *substream,
-		struct snd_soc_dai *dai)
-{
-	int rv;
-	struct msm_hdmi_audio_codec_rx_data *codec_data =
-			dev_get_drvdata(dai->codec->dev);
-
-	rv = codec_data->hdmi_ops.hdmi_cable_status(
-		codec_data->hdmi_core_pdev, 1);
-	if (IS_ERR_VALUE(rv)) {
-		dev_err(dai->dev,
-			"%s() HDMI core is not ready\n", __func__);
-	}
-
-	return rv;
-}
-
 static int msm_hdmi_audio_codec_rx_dai_hw_params(
 		struct snd_pcm_substream *substream,
 		struct snd_pcm_hw_params *params,
@@ -107,37 +34,16 @@ static int msm_hdmi_audio_codec_rx_dai_hw_params(
 	u32 level_shift  = 0; /* 0dB */
 	bool down_mix = 0;
 	u32 num_channels = params_channels(params);
-	int rv = 0;
 
 	struct msm_hdmi_audio_codec_rx_data *codec_data =
 			dev_get_drvdata(dai->codec->dev);
-
-	rv = codec_data->hdmi_ops.hdmi_cable_status(
-		codec_data->hdmi_core_pdev, 1);
-	if (IS_ERR_VALUE(rv)) {
-		dev_err(dai->dev,
-			"%s() HDMI core is not ready\n", __func__);
-		return rv;
-	}
 
 	switch (num_channels) {
 	case 2:
 		channel_allocation  = 0;
 		break;
-	case 3:
-		channel_allocation  = 0x02;//default to FL/FR/FC
-		break;
-	case 4:
-		channel_allocation  = 0x06;//default to FL/FR/FC/RC
-		break;
-	case 5:
-		channel_allocation  = 0x0A;//default to FL/FR/FC/RR/RL
-		break;
 	case 6:
 		channel_allocation  = 0x0B;
-		break;
-	case 7:
-		channel_allocation  = 0x12;//default to FL/FR/FC/RL/RR/RRC/RLC
 		break;
 	case 8:
 		channel_allocation  = 0x13;
@@ -147,47 +53,19 @@ static int msm_hdmi_audio_codec_rx_dai_hw_params(
 		return -EINVAL;
 	}
 
-	dev_dbg(dai->dev,
-		"%s() num_ch %u  samplerate %u channel_allocation = %u\n",
+	dev_dbg(dai->dev, "%s() num_ch %u  samplerate %u channel_allocation = %u\n",
 		__func__, num_channels, params_rate(params),
 		channel_allocation);
 
-	rv = codec_data->hdmi_ops.audio_info_setup(
-			codec_data->hdmi_core_pdev,
-			params_rate(params), num_channels,
-			channel_allocation, level_shift, down_mix);
-	if (IS_ERR_VALUE(rv)) {
-		dev_err(dai->dev,
-			"%s() HDMI core is not ready\n", __func__);
-	}
+	codec_data->hdmi_ops.audio_info_setup(codec_data->hdmi_core_pdev,
+			num_channels, channel_allocation,
+			level_shift, down_mix);
 
-	return rv;
-}
-
-static void msm_hdmi_audio_codec_rx_dai_shutdown(
-		struct snd_pcm_substream *substream,
-		struct snd_soc_dai *dai)
-{
-	int rc;
-
-	struct msm_hdmi_audio_codec_rx_data *codec_data =
-			dev_get_drvdata(dai->codec->dev);
-
-	rc = codec_data->hdmi_ops.hdmi_cable_status(
-			codec_data->hdmi_core_pdev, 0);
-	if (IS_ERR_VALUE(rc)) {
-		dev_err(dai->dev,
-			"%s() HDMI core had problems releasing HDMI audio flag\n",
-			__func__);
-	}
-
-	return;
+	return 0;
 }
 
 static struct snd_soc_dai_ops msm_hdmi_audio_codec_rx_dai_ops = {
-	.startup	= msm_hdmi_audio_codec_rx_dai_startup,
 	.hw_params	= msm_hdmi_audio_codec_rx_dai_hw_params,
-	.shutdown	= msm_hdmi_audio_codec_rx_dai_shutdown
 };
 
 static int msm_hdmi_audio_codec_rx_probe(struct snd_soc_codec *codec)
@@ -264,8 +142,6 @@ static struct snd_soc_dai_driver msm_hdmi_audio_codec_rx_dais[] = {
 static struct snd_soc_codec_driver msm_hdmi_audio_codec_rx_soc_driver = {
 	.probe = msm_hdmi_audio_codec_rx_probe,
 	.remove =  msm_hdmi_audio_codec_rx_remove,
-	.controls = msm_hdmi_codec_rx_controls,
-	.num_controls = ARRAY_SIZE(msm_hdmi_codec_rx_controls),
 };
 
 static int __devinit msm_hdmi_audio_codec_rx_plat_probe(
