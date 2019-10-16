@@ -1,4 +1,4 @@
-/* Copyright (c) 2011-2013, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2011-2014, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -358,8 +358,28 @@ static int ngd_xfer_msg(struct slim_controller *ctrl, struct slim_msg_txn *txn)
 			 * Messages related to data channel management can't
 			 * wait since they are holding reconfiguration lock.
 			 * clk_pause in resume (which can change state back to
-			 * MSM_CTRL_AWAKE), will need that lock
+			 * MSM_CTRL_AWAKE), will need that lock.
+			 * Port disconnection, channel removal calls should pass
+			 * through since there is no activity on the bus and
+			 * those calls are triggered by clients due to
+			 * device_down callback in that situation.
+			 * Returning 0 on the disconnections and
+			 * removals will ensure consistent state of channels,
+			 * ports with the HW
+			 * Remote requests to remove channel/port will be
+			 * returned from the path where they wait on
+			 * acknowledgement from ADSP
 			 */
+			if ((txn->mt == SLIM_MSG_MT_DEST_REFERRED_USER) &&
+				((mc == SLIM_USR_MC_CHAN_CTRL ||
+				mc == SLIM_USR_MC_DISCONNECT_PORT ||
+				mc == SLIM_USR_MC_RECONFIG_NOW)))
+				return -EREMOTEIO;
+			if ((txn->mt == SLIM_MSG_MT_CORE) &&
+				((mc == SLIM_MSG_MC_DISCONNECT_PORT ||
+				mc == SLIM_MSG_MC_NEXT_REMOVE_CHANNEL ||
+				mc == SLIM_USR_MC_RECONFIG_NOW)))
+				return 0;
 			if ((txn->mt == SLIM_MSG_MT_CORE) &&
 				((mc >= SLIM_MSG_MC_CONNECT_SOURCE &&
 				mc <= SLIM_MSG_MC_CHANGE_CONTENT) ||
@@ -368,7 +388,7 @@ static int ngd_xfer_msg(struct slim_controller *ctrl, struct slim_msg_txn *txn)
 				return -EREMOTEIO;
 			if ((txn->mt == SLIM_MSG_MT_DEST_REFERRED_USER) &&
 				((mc >= SLIM_USR_MC_DEFINE_CHAN &&
-				mc <= SLIM_USR_MC_DISCONNECT_PORT)))
+				mc < SLIM_USR_MC_DISCONNECT_PORT)))
 				return -EREMOTEIO;
 			timeout = wait_for_completion_timeout(&dev->ctrl_up,
 							HZ);
@@ -496,11 +516,13 @@ static int ngd_xfer_msg(struct slim_controller *ctrl, struct slim_msg_txn *txn)
 		puc = ((u8 *)pbuf) + 2;
 	if (txn->rbuf)
 		*(puc++) = txn->tid;
-	if ((txn->mt == SLIM_MSG_MT_CORE) &&
+	if (((txn->mt == SLIM_MSG_MT_CORE) &&
 		((txn->mc >= SLIM_MSG_MC_REQUEST_INFORMATION &&
 		txn->mc <= SLIM_MSG_MC_REPORT_INFORMATION) ||
 		(txn->mc >= SLIM_MSG_MC_REQUEST_VALUE &&
-		 txn->mc <= SLIM_MSG_MC_CHANGE_VALUE))) {
+		 txn->mc <= SLIM_MSG_MC_CHANGE_VALUE))) ||
+		(txn->mc == SLIM_USR_MC_REPEAT_CHANGE_VALUE &&
+		txn->mt == SLIM_MSG_MT_DEST_REFERRED_USER)) {
 		*(puc++) = (txn->ec & 0xFF);
 		*(puc++) = (txn->ec >> 8)&0xFF;
 	}
@@ -608,6 +630,44 @@ ngd_xfer_err:
 	return ret ? ret : dev->err;
 }
 
+static int ngd_user_msg(struct slim_controller *ctrl, u8 la, u8 mt, u8 mc,
+				struct slim_ele_access *msg, u8 *buf, u8 len)
+{
+	struct slim_msg_txn txn;
+
+	if (mt != SLIM_MSG_MT_DEST_REFERRED_USER ||
+		mc != SLIM_USR_MC_REPEAT_CHANGE_VALUE) {
+		return -EPROTONOSUPPORT;
+	}
+	if (len > SLIM_MAX_VE_SLC_BYTES ||
+		msg->start_offset > MSM_SLIM_VE_MAX_MAP_ADDR)
+		return -EINVAL;
+	if (len <= 4) {
+		txn.ec = len - 1;
+	} else if (len <= 8) {
+		if (len & 0x1)
+			return -EINVAL;
+		txn.ec = ((len >> 1) + 1);
+	} else {
+		if (len & 0x3)
+			return -EINVAL;
+		txn.ec = ((len >> 2) + 3);
+	}
+	txn.ec |= (0x8 | ((msg->start_offset & 0xF) << 4));
+	txn.ec |= ((msg->start_offset & 0xFF0) << 4);
+
+	txn.la = la;
+	txn.mt = mt;
+	txn.mc = mc;
+	txn.dt = SLIM_MSG_DEST_LOGICALADDR;
+	txn.len = len;
+	txn.rl = len + 6;
+	txn.wbuf = buf;
+	txn.rbuf = NULL;
+	txn.comp = msg->comp;
+	return ngd_xfer_msg(ctrl, &txn);
+}
+
 static int ngd_xferandwait_ack(struct slim_controller *ctrl,
 				struct slim_msg_txn *txn)
 {
@@ -621,6 +681,7 @@ static int ngd_xferandwait_ack(struct slim_controller *ctrl,
 		else
 			ret = txn->ec;
 	}
+
 	if (ret) {
 		if (ret != -EREMOTEIO || txn->mc != SLIM_USR_MC_CHAN_CTRL)
 			SLIM_ERR(dev, "master msg:0x%x,tid:%d ret:%d\n",
@@ -1162,6 +1223,7 @@ static int ngd_notify_slaves(void *data)
 		wait_for_completion_interruptible(&dev->qmi.slave_notify);
 		/* Probe devices for first notification */
 		if (!i) {
+			i++;
 			dev->err = 0;
 			if (dev->dev->of_node)
 				of_register_slim_devices(&dev->ctrl);
@@ -1174,12 +1236,12 @@ static int ngd_notify_slaves(void *data)
 		} else {
 			slim_framer_booted(ctrl);
 		}
-		i++;
 		mutex_lock(&ctrl->m_ctrl);
 		list_for_each_safe(pos, next, &ctrl->devs) {
+			int j;
 			sbdev = list_entry(pos, struct slim_device, dev_list);
 			mutex_unlock(&ctrl->m_ctrl);
-			for (i = 0; i < LADDR_RETRY; i++) {
+			for (j = 0; j < LADDR_RETRY; j++) {
 				ret = slim_get_logical_addr(sbdev,
 						sbdev->e_addr,
 						6, &sbdev->laddr);
